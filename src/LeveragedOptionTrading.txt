@@ -1,0 +1,92 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.13;
+
+import {IPriceOracle} from "./interfaces/IPriceOracle.sol";
+
+contract LeveragedOptionTrading {
+    IPriceOracle public priceOracle;
+    address public owner;
+    
+    struct Position {
+        bool isLong;
+        uint256 amount;  // USD amount
+        uint256 entryPrice; // ETH/USD price at the time of opening
+    }
+    
+    mapping(address => Position) public positions;
+    mapping(address => uint256) public usdBalances;
+
+    uint256 public constant LEVERAGE = 2;
+    
+    event PositionOpened(address indexed user, bool isLong, uint256 amount, uint256 entryPrice);
+    event PositionClosed(address indexed user, uint256 amount, uint256 pnl);
+
+    constructor(address _priceOracle) {
+        priceOracle = IPriceOracle(_priceOracle);
+        owner = msg.sender;
+    }
+    
+    function depositUSD(uint256 _amount) external {
+        usdBalances[msg.sender] += _amount;
+    }
+
+    function openPosition(bool _isLong, uint256 _amount) external {
+        require(usdBalances[msg.sender] >= _amount, "Insufficient USD balance");
+        require(positions[msg.sender].amount == 0, "Existing position must be closed first");
+
+        usdBalances[msg.sender] -= _amount;
+        uint256 currentPrice = priceOracle.getPrice();
+        
+        positions[msg.sender] = Position({
+            isLong: _isLong,
+            amount: _amount,
+            entryPrice: currentPrice
+        });
+
+        emit PositionOpened(msg.sender, _isLong, _amount, currentPrice);
+    }
+    
+    function closePosition() external {
+        Position storage position = positions[msg.sender];
+        require(position.amount > 0, "No position to close");
+
+        uint256 currentPrice = priceOracle.getPrice();
+        uint256 pnl = calculatePnL(position.isLong, position.amount, position.entryPrice, currentPrice);
+        
+        usdBalances[msg.sender] += (position.amount + pnl);
+
+        emit PositionClosed(msg.sender, position.amount, pnl);
+        
+        delete positions[msg.sender];  // Clear the user's position
+    }
+
+    function calculatePnL(bool _isLong, uint256 _amount, uint256 _entryPrice, uint256 _exitPrice) public pure returns (uint256 pnl) {
+    if (_isLong) {
+        // Long position: Profit if exit price is higher than entry price
+        if (_exitPrice > _entryPrice) {
+            uint256 priceChange = _exitPrice - _entryPrice;
+            pnl = (_amount * LEVERAGE * priceChange) / _entryPrice;
+        } else {
+            uint256 priceChange = _entryPrice - _exitPrice;
+            pnl = -int256((_amount * LEVERAGE * priceChange) / _entryPrice); // returning negative pnl for a loss
+        }
+    } else {
+        // Short position: Profit if exit price is lower than entry price
+        if (_exitPrice < _entryPrice) {
+            uint256 priceChange = _entryPrice - _exitPrice;
+            pnl = (_amount * LEVERAGE * priceChange) / _entryPrice;
+        } else {
+            uint256 priceChange = _exitPrice - _entryPrice;
+            pnl = -int256((_amount * LEVERAGE * priceChange) / _entryPrice); // returning negative pnl for a loss
+        }
+    }
+}
+
+    function getUserPosition(address _user) external view returns (Position memory) {
+        return positions[_user];
+    }
+
+    function getUsdBalance(address _user) external view returns (uint256) {
+        return usdBalances[_user];
+    }
+}

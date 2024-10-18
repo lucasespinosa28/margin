@@ -1,0 +1,143 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.13;
+
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IPriceOracle} from "./interfaces/IPriceOracle.sol";
+
+contract LeveragedTrading {
+    IPriceOracle public priceOracle;
+    IERC20 public WETH;
+    IERC20 public USDC;
+
+    uint256 constant LEVERAGE = 2;
+    uint256 constant LIQUIDATION_THRESHOLD = 80; // Position gets liquidated if it drops below 80% value
+
+    struct Position {
+        bool isLong;
+        uint256 collateralAmount;
+        uint256 positionSize; // Size of position with leverage applied
+        uint256 entryPrice; // Price when the position was opened
+    }
+
+    mapping(address => Position) public positions;
+
+    event PositionOpened(
+        address indexed user,
+        bool isLong,
+        uint256 collateralAmount,
+        uint256 positionSize,
+        uint256 entryPrice
+    );
+    event PositionClosed(address indexed user, uint256 profitOrLoss);
+    event PositionLiquidated(address indexed user, uint256 collateralLost);
+
+    constructor(address _priceOracle, address _weth, address _usdc) {
+        priceOracle = IPriceOracle(_priceOracle);
+        WETH = IERC20(_weth);
+        USDC = IERC20(_usdc);
+    }
+
+    function openLong(uint256 wethAmount) external {
+        require(
+            positions[msg.sender].collateralAmount == 0,
+            "Position already open"
+        );
+
+        uint256 usdcPrice = priceOracle.getPrice(address(WETH));
+        uint256 positionSize = wethAmount * usdcPrice * LEVERAGE;
+
+        WETH.transferFrom(msg.sender, address(this), wethAmount);
+
+        positions[msg.sender] = Position({
+            isLong: true,
+            collateralAmount: wethAmount,
+            positionSize: positionSize,
+            entryPrice: usdcPrice
+        });
+
+        emit PositionOpened(
+            msg.sender,
+            true,
+            wethAmount,
+            positionSize,
+            usdcPrice
+        );
+    }
+
+    function openShort(uint256 wethAmount) external {
+        require(
+            positions[msg.sender].collateralAmount == 0,
+            "Position already open"
+        );
+
+        uint256 usdcPrice = priceOracle.getPrice(address(WETH));
+        uint256 positionSize = wethAmount * usdcPrice * LEVERAGE;
+
+        WETH.transferFrom(msg.sender, address(this), wethAmount);
+
+        positions[msg.sender] = Position({
+            isLong: false,
+            collateralAmount: wethAmount,
+            positionSize: positionSize,
+            entryPrice: usdcPrice
+        });
+
+        emit PositionOpened(
+            msg.sender,
+            false,
+            wethAmount,
+            positionSize,
+            usdcPrice
+        );
+    }
+
+    function closePosition() external {
+        Position memory position = positions[msg.sender];
+        require(position.collateralAmount > 0, "No position open");
+
+        uint256 currentPrice = priceOracle.getPrice(address(WETH));
+        uint256 profitOrLoss;
+
+        if (position.isLong) {
+            profitOrLoss =
+                (position.positionSize * currentPrice) /
+                position.entryPrice -
+                position.positionSize;
+        } else {
+            profitOrLoss =
+                position.positionSize -
+                (position.positionSize * currentPrice) /
+                position.entryPrice;
+        }
+
+        uint256 usdcAmount = position.collateralAmount *
+            currentPrice *
+            LEVERAGE;
+        USDC.transfer(msg.sender, usdcAmount + profitOrLoss);
+
+        delete positions[msg.sender];
+
+        emit PositionClosed(msg.sender, profitOrLoss);
+    }
+
+    function liquidatePosition(address user) external {
+        Position memory position = positions[user];
+        require(position.collateralAmount > 0, "No position open");
+
+        uint256 currentPrice = priceOracle.getPrice(address(WETH));
+        uint256 liquidationPrice = (position.entryPrice *
+            LIQUIDATION_THRESHOLD) / 100;
+
+        if (
+            (position.isLong && currentPrice < liquidationPrice) ||
+            (!position.isLong && currentPrice > liquidationPrice)
+        ) {
+            uint256 collateralLost = position.collateralAmount;
+
+            delete positions[user];
+            WETH.transfer(msg.sender, collateralLost); // Liquidator receives collateral as a reward
+
+            emit PositionLiquidated(user, collateralLost);
+        }
+    }
+}
